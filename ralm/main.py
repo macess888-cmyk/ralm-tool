@@ -31,17 +31,36 @@ def map_a1z26_reverse(text):
     return values
 
 
+def map_a0z25_forward(values):
+    output = []
+    for v in values:
+        if v < 0 or v > 25:
+            raise ValueError(f"value out of range for A0Z25: {v}")
+        output.append(ALPHABET[v])
+    return "".join(output)
+
+
+def map_a0z25_reverse(text):
+    values = []
+    for ch in text:
+        ch = ch.upper()
+        if ch not in ALPHABET:
+            raise ValueError(f"invalid character for A0Z25: {ch}")
+        values.append(ALPHABET.index(ch))
+    return values
+
+
 def utc_now_iso():
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def utc_stamp():
-    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
 
 
 def build_receipt(input_data, rule, mode, direction, output, status, reproducibility):
     return {
-        "tool": "RALM v0.2",
+        "tool": "RALM v0.3-dev",
         "observer": "HACR-ALL",
         "input": input_data,
         "rule": rule,
@@ -85,7 +104,7 @@ def parse_text(input_text):
 
 
 def recompute_output(input_data, rule, mode, direction):
-    if rule != "A1Z26":
+    if rule not in ("A1Z26", "A0Z25"):
         raise ValueError(f"unsupported rule in receipt: {rule}")
     if mode != "fail-closed":
         raise ValueError(f"unsupported mode in receipt: {mode}")
@@ -93,12 +112,16 @@ def recompute_output(input_data, rule, mode, direction):
     if direction == "forward":
         if not input_data:
             raise ValueError("receipt input is empty")
-        return map_a1z26_forward(input_data)
+        if rule == "A1Z26":
+            return map_a1z26_forward(input_data)
+        return map_a0z25_forward(input_data)
 
     if direction == "reverse":
         if not input_data:
             raise ValueError("receipt input is empty")
-        return map_a1z26_reverse(input_data)
+        if rule == "A1Z26":
+            return map_a1z26_reverse(input_data)
+        return map_a0z25_reverse(input_data)
 
     raise ValueError(f"invalid direction in receipt: {direction}")
 
@@ -217,7 +240,9 @@ def print_json(path, data, header):
 
 
 def run_map(args):
-    if args.rule.lower() != "a1z26":
+    rule = args.rule.upper()
+
+    if rule not in ("A1Z26", "A0Z25"):
         print("status: FAIL")
         print("reason: unsupported rule")
         sys.exit(1)
@@ -230,18 +255,17 @@ def run_map(args):
     try:
         if args.direction == "forward":
             input_data = parse_numbers(args.input)
-            output = map_a1z26_forward(input_data)
         else:
             input_data = parse_text(args.input)
-            output = map_a1z26_reverse(input_data)
 
-        rerun_output = recompute_output(input_data, "A1Z26", "fail-closed", args.direction)
+        output = recompute_output(input_data, rule, "fail-closed", args.direction)
+        rerun_output = recompute_output(input_data, rule, "fail-closed", args.direction)
         reproducibility = "PASS" if rerun_output == output else "FAIL"
         status = "PASS" if reproducibility == "PASS" else "FAIL"
 
         receipt = build_receipt(
             input_data=input_data,
-            rule="A1Z26",
+            rule=rule,
             mode="fail-closed",
             direction=args.direction,
             output=output,
@@ -253,7 +277,7 @@ def run_map(args):
         print("RALM RECEIPT")
         print(f"direction: {args.direction}")
         print(f"input: {input_data}")
-        print("rule: A1Z26")
+        print(f"rule: {rule}")
         print("mode: fail-closed")
         print(f"output: {output}")
         print("observer: HACR-ALL")
@@ -268,7 +292,7 @@ def run_map(args):
 
         receipt = build_receipt(
             input_data=failure_input,
-            rule="A1Z26",
+            rule=rule,
             mode="fail-closed",
             direction=args.direction,
             output=failure_output,
@@ -279,7 +303,7 @@ def run_map(args):
 
         print("RALM RECEIPT")
         print(f"direction: {args.direction}")
-        print("rule: A1Z26")
+        print(f"rule: {rule}")
         print("mode: fail-closed")
         print("observer: HACR-ALL")
         print("status: FAIL")
@@ -425,7 +449,7 @@ def run_export_summary(args):
             raise FileNotFoundError("no receipt files found")
 
         summary = {
-            "tool": "RALM v0.2",
+            "tool": "RALM v0.3-dev",
             "observer": "HACR-ALL",
             "generated_at_utc": utc_now_iso(),
             "receipt_count": len(files),
@@ -518,11 +542,11 @@ def run_clean_failed(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RALM v0.2")
+    parser = argparse.ArgumentParser(description="RALM v0.3-dev")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     map_parser = subparsers.add_parser("map", help="map in forward or reverse direction")
-    map_parser.add_argument("--rule", required=True, help="mapping rule, e.g. a1z26")
+    map_parser.add_argument("--rule", required=True, help="mapping rule: a1z26 or a0z25")
     map_parser.add_argument("--mode", required=True, help="execution mode, e.g. fail-closed")
     map_parser.add_argument("--direction", choices=["forward", "reverse"], required=True, help="mapping direction")
     map_parser.add_argument("--input", required=True, help='forward: "8,1,3,18" | reverse: "HACR"')
