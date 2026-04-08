@@ -1,0 +1,17 @@
+{
+  "tool": "RALM v0.1",
+  "observer": "HACR-ALL",
+  "input": [
+    8,
+    1,
+    3,
+    18
+  ],
+  "rule": "A1Z26",
+  "mode": "fail-closed",
+  "output": "HACR",
+  "reproducibility": "PASS",
+  "status": "PASS",
+  "timestamp_utc": "2026-04-08T07:45:13.561947Z",
+  "sha256": "42c3b0a09d851471eb3f24262ec90ae441894c04ccdf37f43da229c1e9c80040"
+}
