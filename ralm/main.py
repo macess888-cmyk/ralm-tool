@@ -11,6 +11,29 @@ ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 RECEIPTS_DIR = "receipts"
 FAILED_DIR = os.path.join(RECEIPTS_DIR, "failed")
 
+RULE_REGISTRY = {
+    "A1Z26": {
+        "version": "1.0",
+        "active": True,
+        "directions": ["forward", "reverse"],
+        "mode": "fail-closed",
+        "description": "A=1 ... Z=26",
+        "forward_min": 1,
+        "forward_max": 26,
+        "reverse_charset": ALPHABET,
+    },
+    "A0Z25": {
+        "version": "1.0",
+        "active": True,
+        "directions": ["forward", "reverse"],
+        "mode": "fail-closed",
+        "description": "A=0 ... Z=25",
+        "forward_min": 0,
+        "forward_max": 25,
+        "reverse_charset": ALPHABET,
+    },
+}
+
 
 def map_a1z26_forward(values):
     output = []
@@ -58,15 +81,36 @@ def utc_stamp():
     return datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
 
 
-def build_receipt(input_data, rule, mode, direction, output, status, reproducibility):
+def get_rule_spec(rule_name):
+    rule = rule_name.upper()
+    if rule not in RULE_REGISTRY:
+        raise ValueError(f"unsupported rule: {rule}")
+    return rule, RULE_REGISTRY[rule]
+
+
+def build_receipt(
+    input_data,
+    rule,
+    mode,
+    direction,
+    output,
+    status,
+    reproducibility,
+    admissibility,
+    admissibility_reason,
+    rule_version,
+):
     return {
-        "tool": "RALM v0.3-dev",
+        "tool": "RALM v0.4-dev",
         "observer": "HACR-ALL",
         "input": input_data,
         "rule": rule,
+        "rule_version": rule_version,
         "mode": mode,
         "direction": direction,
         "output": output,
+        "admissibility": admissibility,
+        "admissibility_reason": admissibility_reason,
         "reproducibility": reproducibility,
         "status": status,
         "timestamp_utc": utc_now_iso(),
@@ -103,25 +147,65 @@ def parse_text(input_text):
     return text
 
 
-def recompute_output(input_data, rule, mode, direction):
-    if rule not in ("A1Z26", "A0Z25"):
-        raise ValueError(f"unsupported rule in receipt: {rule}")
-    if mode != "fail-closed":
-        raise ValueError(f"unsupported mode in receipt: {mode}")
+def check_rule_admissibility(rule, mode, direction, input_data):
+    rule_name, spec = get_rule_spec(rule)
+
+    if not spec["active"]:
+        return False, "rule inactive", spec["version"], rule_name
+
+    if mode != spec["mode"]:
+        return False, f"mode {mode} not allowed for {rule_name}", spec["version"], rule_name
+
+    if direction not in spec["directions"]:
+        return False, f"direction {direction} not allowed for {rule_name}", spec["version"], rule_name
 
     if direction == "forward":
-        if not input_data:
-            raise ValueError("receipt input is empty")
-        if rule == "A1Z26":
-            return map_a1z26_forward(input_data)
-        return map_a0z25_forward(input_data)
+        if not isinstance(input_data, list) or not input_data:
+            return False, "forward input must be a non-empty integer list", spec["version"], rule_name
+        for value in input_data:
+            if not isinstance(value, int):
+                return False, f"non-integer forward input: {value}", spec["version"], rule_name
+            if value < spec["forward_min"] or value > spec["forward_max"]:
+                return (
+                    False,
+                    f"input value {value} outside {rule_name} forward domain",
+                    spec["version"],
+                    rule_name,
+                )
+        return True, "rule active and input within declared domain", spec["version"], rule_name
 
     if direction == "reverse":
-        if not input_data:
-            raise ValueError("receipt input is empty")
-        if rule == "A1Z26":
+        if not isinstance(input_data, str) or not input_data:
+            return False, "reverse input must be a non-empty string", spec["version"], rule_name
+        for ch in input_data:
+            if ch.upper() not in spec["reverse_charset"]:
+                return (
+                    False,
+                    f"character {ch} outside {rule_name} reverse domain",
+                    spec["version"],
+                    rule_name,
+                )
+        return True, "rule active and input within declared domain", spec["version"], rule_name
+
+    return False, f"invalid direction {direction}", spec["version"], rule_name
+
+
+def recompute_output(input_data, rule, mode, direction):
+    admitted, reason, _, rule_name = check_rule_admissibility(rule, mode, direction, input_data)
+    if not admitted:
+        raise ValueError(reason)
+
+    if direction == "forward":
+        if rule_name == "A1Z26":
+            return map_a1z26_forward(input_data)
+        if rule_name == "A0Z25":
+            return map_a0z25_forward(input_data)
+
+    if direction == "reverse":
+        if rule_name == "A1Z26":
             return map_a1z26_reverse(input_data)
-        return map_a0z25_reverse(input_data)
+        if rule_name == "A0Z25":
+            return map_a0z25_reverse(input_data)
 
     raise ValueError(f"invalid direction in receipt: {direction}")
 
@@ -192,21 +276,34 @@ def verify_receipt_file(path, receipt):
     sha_match = stored_sha == recomputed_sha
 
     try:
+        admitted, reason, rule_version, rule_name = check_rule_admissibility(
+            receipt.get("rule", ""),
+            receipt.get("mode", ""),
+            receipt.get("direction", "forward"),
+            receipt.get("input"),
+        )
+        admissibility = "PASS" if admitted else "FAIL"
+        admissibility_reason = reason
+        version_match = receipt.get("rule_version", "") == rule_version
         expected_output = recompute_output(
             receipt.get("input"),
-            receipt.get("rule", ""),
+            rule_name,
             receipt.get("mode", ""),
             receipt.get("direction", "forward"),
         )
         output_match = expected_output == receipt.get("output")
         reproducibility = "PASS" if output_match else "FAIL"
-    except Exception:
+    except Exception as e:
         expected_output = ""
         output_match = False
         reproducibility = "FAIL"
+        admissibility = "FAIL"
+        admissibility_reason = str(e)
+        version_match = False
 
     integrity = "PASS" if sha_match else "FAIL"
-    status = "PASS" if sha_match and output_match else "FAIL"
+    version_status = "PASS" if version_match else "FAIL"
+    status = "PASS" if sha_match and output_match and admissibility == "PASS" and version_match else "FAIL"
 
     return {
         "path": path,
@@ -216,6 +313,9 @@ def verify_receipt_file(path, receipt):
         "recorded_output": receipt.get("output"),
         "reproducibility": reproducibility,
         "integrity": integrity,
+        "admissibility": admissibility,
+        "admissibility_reason": admissibility_reason,
+        "rule_version_status": version_status,
         "status": status,
     }
 
@@ -227,6 +327,9 @@ def print_audit_result(result):
     print(f"stored_sha256: {result['stored_sha256']}")
     print(f"recomputed_sha256: {result['recomputed_sha256']}")
     print(f"integrity: {result['integrity']}")
+    print(f"admissibility: {result['admissibility']}")
+    print(f"admissibility_reason: {result['admissibility_reason']}")
+    print(f"rule_version_status: {result['rule_version_status']}")
     print(f"expected_output: {result['expected_output']}")
     print(f"recorded_output: {result['recorded_output']}")
     print(f"reproducibility: {result['reproducibility']}")
@@ -239,18 +342,22 @@ def print_json(path, data, header):
     print(json.dumps(data, indent=2))
 
 
+def run_registry(args):
+    print("RALM RULE REGISTRY")
+    print("observer: HACR-ALL")
+    for rule_name, spec in RULE_REGISTRY.items():
+        print(f"rule: {rule_name}")
+        print(f"  version: {spec['version']}")
+        print(f"  active: {spec['active']}")
+        print(f"  directions: {', '.join(spec['directions'])}")
+        print(f"  mode: {spec['mode']}")
+        print(f"  description: {spec['description']}")
+        print(f"  forward_domain: {spec['forward_min']}..{spec['forward_max']}")
+
+
 def run_map(args):
     rule = args.rule.upper()
-
-    if rule not in ("A1Z26", "A0Z25"):
-        print("status: FAIL")
-        print("reason: unsupported rule")
-        sys.exit(1)
-
-    if args.mode.lower() != "fail-closed":
-        print("status: FAIL")
-        print("reason: unsupported mode")
-        sys.exit(1)
+    mode = args.mode.lower()
 
     try:
         if args.direction == "forward":
@@ -258,29 +365,42 @@ def run_map(args):
         else:
             input_data = parse_text(args.input)
 
-        output = recompute_output(input_data, rule, "fail-closed", args.direction)
-        rerun_output = recompute_output(input_data, rule, "fail-closed", args.direction)
+        admitted, admissibility_reason, rule_version, rule_name = check_rule_admissibility(
+            rule, mode, args.direction, input_data
+        )
+
+        if not admitted:
+            raise ValueError(admissibility_reason)
+
+        output = recompute_output(input_data, rule_name, mode, args.direction)
+        rerun_output = recompute_output(input_data, rule_name, mode, args.direction)
         reproducibility = "PASS" if rerun_output == output else "FAIL"
-        status = "PASS" if reproducibility == "PASS" else "FAIL"
+        status = "PASS" if reproducibility == "PASS" and admitted else "FAIL"
 
         receipt = build_receipt(
             input_data=input_data,
-            rule=rule,
-            mode="fail-closed",
+            rule=rule_name,
+            rule_version=rule_version,
+            mode=mode,
             direction=args.direction,
             output=output,
             status=status,
             reproducibility=reproducibility,
+            admissibility="PASS",
+            admissibility_reason=admissibility_reason,
         )
         path, digest = save_receipt(receipt)
 
         print("RALM RECEIPT")
         print(f"direction: {args.direction}")
         print(f"input: {input_data}")
-        print(f"rule: {rule}")
-        print("mode: fail-closed")
+        print(f"rule: {rule_name}")
+        print(f"rule_version: {rule_version}")
+        print(f"mode: {mode}")
         print(f"output: {output}")
         print("observer: HACR-ALL")
+        print("admissibility: PASS")
+        print(f"admissibility_reason: {admissibility_reason}")
         print(f"reproducibility: {reproducibility}")
         print(f"status: {status}")
         print(f"receipt: {path}")
@@ -290,24 +410,37 @@ def run_map(args):
         failure_input = [] if args.direction == "forward" else ""
         failure_output = "" if args.direction == "forward" else []
 
+        try:
+            _, spec = get_rule_spec(rule)
+            rule_version = spec["version"]
+            rule_name = rule
+        except Exception:
+            rule_version = "unknown"
+            rule_name = rule
+
         receipt = build_receipt(
             input_data=failure_input,
-            rule=rule,
-            mode="fail-closed",
+            rule=rule_name,
+            rule_version=rule_version,
+            mode=mode,
             direction=args.direction,
             output=failure_output,
             status="FAIL",
             reproducibility="FAIL",
+            admissibility="FAIL",
+            admissibility_reason=str(e),
         )
         path, digest = save_receipt(receipt)
 
         print("RALM RECEIPT")
         print(f"direction: {args.direction}")
-        print(f"rule: {rule}")
-        print("mode: fail-closed")
+        print(f"rule: {rule_name}")
+        print(f"rule_version: {rule_version}")
+        print(f"mode: {mode}")
         print("observer: HACR-ALL")
+        print("admissibility: FAIL")
+        print(f"admissibility_reason: {e}")
         print("status: FAIL")
-        print(f"reason: {e}")
         print(f"receipt: {path}")
         print(f"sha256: {digest}")
         sys.exit(1)
@@ -449,7 +582,7 @@ def run_export_summary(args):
             raise FileNotFoundError("no receipt files found")
 
         summary = {
-            "tool": "RALM v0.3-dev",
+            "tool": "RALM v0.4-dev",
             "observer": "HACR-ALL",
             "generated_at_utc": utc_now_iso(),
             "receipt_count": len(files),
@@ -467,9 +600,12 @@ def run_export_summary(args):
                 "timestamp_utc": receipt.get("timestamp_utc", ""),
                 "input": receipt.get("input"),
                 "rule": receipt.get("rule", ""),
+                "rule_version": receipt.get("rule_version", ""),
                 "mode": receipt.get("mode", ""),
                 "direction": receipt.get("direction", "forward"),
                 "output": receipt.get("output"),
+                "admissibility": receipt.get("admissibility", ""),
+                "admissibility_reason": receipt.get("admissibility_reason", ""),
                 "stored_sha256": receipt.get("sha256", ""),
                 "integrity": result["integrity"],
                 "reproducibility": result["reproducibility"],
@@ -542,8 +678,11 @@ def run_clean_failed(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RALM v0.3-dev")
+    parser = argparse.ArgumentParser(description="RALM v0.4-dev")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    registry_parser = subparsers.add_parser("registry", help="show declared rules")
+    registry_parser.set_defaults(func=run_registry)
 
     map_parser = subparsers.add_parser("map", help="map in forward or reverse direction")
     map_parser.add_argument("--rule", required=True, help="mapping rule: a1z26 or a0z25")
